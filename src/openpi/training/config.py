@@ -65,6 +65,10 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Local root directory of the LeRobot dataset. If None, the dataset is resolved from
+    # the HF hub / HF_LEROBOT_HOME as usual. Needed for datasets that live on scratch and
+    # were never pushed to the hub.
+    root: pathlib.Path | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
