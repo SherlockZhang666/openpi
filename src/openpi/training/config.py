@@ -20,12 +20,14 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.sharpa_policy as sharpa_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
 import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
+import openpi.training.sharpa_configs as sharpa_configs
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
@@ -356,6 +358,69 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class SharpaDataConfig(DataConfigFactory):
+    """OpenArm(7) + Sharpa Wave left hand(22), single (left) hand.
+
+    Actions are 28-d palm-centric, state is 29-d [arm 7 | hand 22]; see
+    openpi/policies/sharpa_policy.py for the layout. This class only remaps the
+    LeRobot dataset's key names onto the keys SharpaInputs consumes.
+    """
+
+    # Local root of the LeRobot dataset. These datasets live on scratch and were never
+    # pushed to the hub, so `repo_id` is a placeholder and `root` is what actually
+    # locates the data. Consumed by data_loader.create_torch_dataset.
+    root: pathlib.Path = tyro.MISSING
+    # The action key *in the raw dataset*, used to compute delta_timestamps. This is
+    # applied before the repack transform runs, so it is the dataset's name ("action"),
+    # not the post-repack name ("actions").
+    action_sequence_keys: Sequence[str] = ("action",)
+    head_img_name: str = "observation.images.head"
+    wrist_img_name: str = "observation.images.wrist"
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "base": self.head_img_name,
+                        "wrist": self.wrist_img_name,
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[sharpa_policy.SharpaInputs(model_type=model_config.model_type)],
+            outputs=[sharpa_policy.SharpaOutputs()],
+        )
+
+        # Deliberately no DeltaActions. The 28 dims do not share a meaning: fingers are
+        # absolute joint angles while the wrist part is already a delta. A blanket delta
+        # transform would turn the fingers into deltas too, contradicting the definition
+        # in tactile_steering/data/actions.py::palm_centric that the predictor side has
+        # already cached data against. If the fingers should become deltas, change that
+        # definition -- do not patch it here.
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            # Both of these must be forwarded explicitly. action_sequence_keys defaults
+            # to ("actions",), which is the post-repack name -- leaving it would make the
+            # data loader look for a key the raw dataset does not have.
+            action_sequence_keys=self.action_sequence_keys,
+            root=self.root if self.root is not tyro.MISSING else None,
         )
 
 
@@ -972,6 +1037,8 @@ _CONFIGS = [
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
+    # Sharpa Wave single-hand rig; see openpi/training/sharpa_configs.py.
+    *sharpa_configs.get_sharpa_configs(),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
