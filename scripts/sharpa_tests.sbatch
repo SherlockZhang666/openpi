@@ -1,15 +1,15 @@
 #!/bin/bash
 #SBATCH -J sharpa_tests
-#SBATCH -p gpu_requeue
-# ⚠️ 必须钉死卡型：gpu_requeue 里混着 H200 / H100 / A100-80 / A100-40 / A40 /
-#    V100 / RTX A6000，以及 MIG 切片（1g.5gb / 1g.10gb / 3g.20gb）。
-#    不钉死会落到装不下的切片上。这些测试本身是 CPU 的，但 import jax 会初始化
-#    设备，钉住卡型让"能不能起来"这件事可复现。
-#SBATCH --gres=gpu:nvidia_a100-sxm4-80gb:1
+# ⚠️ 这是 CPU 分区，**不要**给它加 --gres=gpu。
+#    本作业跑的全是 pytest（含变异扫描），没有一行需要 GPU。
+#    第一版投了 gpu_requeue + 钉死 A100-80GB，结果排在 ReqNodeNotAvail 上不动 ——
+#    那个卡型当时 9 个节点里 2 inval / 2 down / 2 drained / 1 allocated，
+#    为一堆 CPU 测试去抢全集群最紧俏的卡是纯浪费。
+#    钉卡型那条规矩是给真正吃 GPU 的活（训练、延迟实测）用的。
+#SBATCH -p shared
 #SBATCH -c 8
 #SBATCH --mem 48G
 #SBATCH -t 0-01:30:00
-#SBATCH --requeue
 #SBATCH --open-mode=append
 #SBATCH -o /n/netscratch/ydu_lab/Lab/hangxing/logs/sharpa_tests_%j.out
 #SBATCH -e /n/netscratch/ydu_lab/Lab/hangxing/logs/sharpa_tests_%j.err
@@ -19,8 +19,8 @@
 # 为什么要 sbatch：openpi 的套件光 import jax 就要 1–2 分钟，变异扫描要跑十几遍，
 # 登录节点不跑计算（HANDOFF.md §11）。
 #
-# 抢占安全：本作业只读代码、跑测试，产物只有日志；变异扫描每次都从 /tmp 的原件
-# 还原，被踢了重跑不会留下改坏的源文件。⚠️ 但如果作业在变异中途被 SIGKILL，
+# 本作业只读代码、跑测试，产物只有日志；变异扫描每次都从 /tmp 的原件还原。
+# ⚠️ 如果作业在变异中途被 SIGKILL，
 # 工作区里会残留一个被变异的源文件 —— 收尾的 `git diff --stat` 就是用来发现这件事的，
 # 输出非空就 `git checkout` 掉。
 
@@ -30,11 +30,10 @@ OPENPI=$ROOT/code/Tactile/openpi
 TS=$ROOT/code/Tactile/tactile_steering
 PY=$OPENPI/.venv/bin/python
 
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export JAX_PLATFORMS=cpu   # CPU 分区上没有 GPU，别让 jax 去找设备
 export HF_HUB_OFFLINE=1   # 不让 data_loader_test 去够 HF hub
 
 echo "===== attempt at $(date -Is) on $(hostname) (job $SLURM_JOB_ID, restarts=${SLURM_RESTART_COUNT:-0}) ====="
-nvidia-smi --query-gpu=name,memory.total --format=csv
 
 cd "$OPENPI" || exit 1
 
