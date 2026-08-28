@@ -59,7 +59,9 @@ echo "tactile_steering pytest exit=$?"
 echo
 echo "########## 3. 变异扫描（护栏必须能失败，HANDOFF.md §12）##########"
 bash "$OPENPI/scripts/sharpa_mutation_sweep.sh"
-echo "mutation sweep exit=$?"
+SWEEP=$?
+echo "mutation sweep exit=$SWEEP"
+[ $SWEEP -eq 0 ] || echo "!!!!! 变异扫描判定失败，见上面的 BAD 行 !!!!!"
 
 echo
 echo "########## 4. 收尾：工作区必须是干净的 ##########"

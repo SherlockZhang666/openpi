@@ -16,20 +16,42 @@ restore () { for f in "$CFG" "$DL" "$POL" "$SC"; do cp "/tmp/$(basename "$f").or
 run_mutation () {
   local name="$1" file="$2" old="$3" new="$4"
   restore
-  local n
-  n=$(grep -c -F -- "$old" "$file")
-  if [ "$n" != "1" ]; then echo "SKIP $name: anchor hits=$n"; return; fi
+  # WARNING do not use `grep -c` here: with a multi-line pattern grep treats each
+  # line as its own pattern and counts matching LINES, so a multi-line anchor comes
+  # back as 2/3/5 and the mutation is silently skipped. The first version of this
+  # script did exactly that -- 6 of 11 mutations never actually ran, and the log
+  # showed only a SKIP line.
   python3 - "$file" "$old" "$new" <<'PYEOF'
 import io, sys
 f, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
 s = io.open(f, encoding="utf-8").read()
+n = s.count(old)
+if n != 1:
+    sys.stderr.write("ANCHOR-COUNT=%d\n" % n)
+    sys.exit(3)
 io.open(f, "w", encoding="utf-8").write(s.replace(old, new, 1))
 PYEOF
+  if [ $? -ne 0 ]; then
+    echo "[$name] SKIP <-- BAD: anchor did not appear exactly once"
+    BAD=$((BAD + 1))
+    return
+  fi
   local out
   out=$(timeout 400 $PY -m pytest src/openpi/training/sharpa_configs_test.py \
         src/openpi/policies/sharpa_policy_test.py -q -p no:cacheprovider 2>&1 | tail -1)
-  echo "[$name] $out"
+  # A mutation is only useful if it makes a test FAIL. An `error` means the mutation
+  # broke the code rather than changing its behaviour -- that proves nothing about the
+  # guardrail, so it counts as BAD too.
+  case "$out" in
+    *failed*)  echo "[$name] CAUGHT   $out" ;;
+    *error*)   echo "[$name] BAD <-- mutation broke the code, not its behaviour: $out"
+               BAD=$((BAD + 1)) ;;
+    *)         echo "[$name] SURVIVED <-- BAD: guardrail did not catch it: $out"
+               BAD=$((BAD + 1)) ;;
+  esac
 }
+
+BAD=0
 
 # --- Task 0: 上游补丁 ---
 run_mutation "M1 LeRobotDataset 不传 root" "$DL" \
@@ -64,9 +86,8 @@ run_mutation "M6 输出不切回 28" "$POL" \
   'return {"actions": np.asarray(data["actions"])}'
 
 run_mutation "M7 掩码分支写成 != PI0 (PI05 下静默翻转)" "$POL" \
-  "                else np.False_," \
-  "                if self.model_type != _model.ModelType.PI0
-                else np.False_,"
+  "                if self.model_type == _model.ModelType.PI0_FAST" \
+  "                if self.model_type != _model.ModelType.PI0"
 
 run_mutation "M8 相机槽位互换" "$POL" \
   '                "base_0_rgb": head_image,
@@ -95,3 +116,11 @@ echo "--- 已还原，确认基线仍然全绿 ---"
 timeout 400 $PY -m pytest src/openpi/training/sharpa_configs_test.py \
   src/openpi/policies/sharpa_policy_test.py -q -p no:cacheprovider 2>&1 | tail -1
 git -C "$REPO" diff --stat
+
+echo "--- 变异扫描判决 ---"
+if [ $BAD -ne 0 ]; then
+  echo "MUTATION SWEEP FAILED: $BAD mutation(s) skipped, survived, or malformed."
+  echo "A sweep that silently does nothing is worse than no sweep -- fix the anchors."
+  exit 1
+fi
+echo "MUTATION SWEEP OK: every mutation was applied and caught."
