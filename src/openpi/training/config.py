@@ -71,6 +71,12 @@ class DataConfig:
     # the HF hub / HF_LEROBOT_HOME as usual. Needed for datasets that live on scratch and
     # were never pushed to the hub.
     root: pathlib.Path | None = None
+    # LeRobot video decoding backend. If None, LeRobot picks its own default, which is
+    # torchcodec whenever the package merely *imports* -- see get_safe_default_codec(), which
+    # only does find_spec("torchcodec") and never checks that it loads. On this cluster it does
+    # not load (no libavutil anywhere, no ffmpeg module), so the default crashes at the first
+    # decoded frame. Set "pyav" to pin the fallback that actually works.
+    video_backend: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -421,6 +427,9 @@ class SharpaDataConfig(DataConfigFactory):
             # data loader look for a key the raw dataset does not have.
             action_sequence_keys=self.action_sequence_keys,
             root=self.root if self.root is not tyro.MISSING else None,
+            # torchcodec is installed in this venv but cannot load (no ffmpeg shared libs on
+            # the cluster), and LeRobot would pick it anyway. Pin pyav.
+            video_backend="pyav",
         )
 
 

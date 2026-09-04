@@ -23,7 +23,7 @@ import openpi.training.weight_loaders as weight_loaders
 
 _DEFAULT_DATASET_ROOT = "/n/netscratch/ydu_lab/Lab/hangxing/data/sharpa_lerobot"
 _DEFAULT_PRETRAINED = "gs://openpi-assets/checkpoints/pi05_base/params"
-_DEFAULT_CKPT_ROOT = "/n/netscratch/ydu_lab/Lab/hangxing/ckpt/sharpa_pi05"
+_DEFAULT_CKPT_ROOT = "/n/netscratch/ydu_lab/Lab/hangxing/code/Tactile/ckpt/sharpa_pi05"
 
 # Matches dexjoco. discrete_state_input is left at the pi05 default (True), so the 29-d
 # state is discretised into language tokens rather than fed in as a continuous input.

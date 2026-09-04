@@ -34,10 +34,11 @@ class _FakeMeta:
 
 
 class _FakeDataset:
-    def __init__(self, repo_id, root=None, delta_timestamps=None, **kwargs):
+    def __init__(self, repo_id, root=None, delta_timestamps=None, video_backend=None, **kwargs):
         self.repo_id = repo_id
         self.root = root
         self.delta_timestamps = delta_timestamps
+        self.video_backend = video_backend
 
     def __len__(self):
         return 0
@@ -78,12 +79,40 @@ def test_create_torch_dataset_keeps_upstream_behaviour_when_root_is_none(monkeyp
     assert list(ds.delta_timestamps) == ["actions"]
 
 
+def test_data_config_has_video_backend_field():
+    """LeRobot's get_safe_default_codec() picks torchcodec on find_spec alone, without ever
+    checking that it loads. It does not load on this cluster (no ffmpeg shared libs), so the
+    default blows up on the first decoded frame -- during training, not at construction."""
+    fields = {f.name for f in dataclasses.fields(_config.DataConfig)}
+    assert "video_backend" in fields
+    assert _config.DataConfig().video_backend is None
+
+
+def test_create_torch_dataset_forwards_video_backend_to_lerobot(monkeypatch):
+    dc = _config.DataConfig(repo_id="local_repo", video_backend="pyav")
+    assert _capture_lerobot_call(monkeypatch, dc).video_backend == "pyav"
+
+
+def test_create_torch_dataset_keeps_upstream_behaviour_when_video_backend_is_none(monkeypatch):
+    """None must reach LeRobot as None so it keeps choosing its own default."""
+    dc = _config.DataConfig(repo_id="physical-intelligence/libero")
+    assert _capture_lerobot_call(monkeypatch, dc).video_backend is None
+
+
+def test_sharpa_data_config_pins_pyav():
+    """The whole point of the field: SharpaDataConfig must not leave the choice to LeRobot."""
+    dc = _config.SharpaDataConfig(root=pathlib.Path("/x"), repo_id="local_repo")
+    created = dc.create(pathlib.Path("/tmp/assets"), pi0_config.Pi0Config(pi05=True))
+    assert created.video_backend == "pyav"
+
+
 def test_data_loader_patch_is_still_in_place():
-    """Structural backstop for the two upstream-file edits, which are the ones most
+    """Structural backstop for the upstream-file edits, which are the ones most
     likely to be silently dropped on a rebase onto upstream."""
     src = inspect.getsource(_data_loader.create_torch_dataset)
     assert "data_config.root" in src
     assert src.count("root=root") >= 2, "both LeRobotDatasetMetadata and LeRobotDataset need root="
+    assert "video_backend=data_config.video_backend" in src
 
 
 # ---------------------------------------------------------------------------
