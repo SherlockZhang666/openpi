@@ -25,8 +25,8 @@ def _example():
 
 
 def test_inputs_maps_wrist_to_left_wrist_slot():
-    """The wrist camera is this rig's primary view and must land in left_wrist_0_rgb;
-    the head camera goes to base_0_rgb. Mixing them up is silent, hence this test."""
+    """The wrist camera must land in left_wrist_0_rgb and the head camera in
+    base_0_rgb. Mixing them up is silent, hence this test."""
     ex = _example()
     out = sharpa_policy.SharpaInputs(model_type=_model.ModelType.PI05)(ex)
     assert set(out["image"]) == {"base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"}

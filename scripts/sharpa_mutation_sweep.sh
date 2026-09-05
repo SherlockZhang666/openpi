@@ -1,5 +1,5 @@
 #!/bin/bash
-# 变异测试：证明 Task 0/2/3/4 的护栏真的能失败（HANDOFF.md §12）。
+# 变异测试：证明 Task 0/2/3/4 的护栏真的能失败。
 set -u
 REPO=/n/netscratch/ydu_lab/Lab/hangxing/code/Tactile/openpi
 PY=$REPO/.venv/bin/python

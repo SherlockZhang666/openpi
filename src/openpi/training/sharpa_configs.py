@@ -60,7 +60,7 @@ class SharpaTaskConfig:
     wrist_img_name: str = "observation.images.wrist"
 
 
-# The four tasks from HANDOFF.md section 3, all left-hand single-hand.
+# The four target tasks, all left-hand single-hand.
 SHARPA_TASKS: list[SharpaTaskConfig] = [
     SharpaTaskConfig(name="sharpa_egg", data_subdir="pick_up_the_egg"),
     SharpaTaskConfig(name="sharpa_tissue", data_subdir="pull_tissue"),

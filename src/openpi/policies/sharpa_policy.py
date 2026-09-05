@@ -20,14 +20,10 @@ State is 29-d: [0:7] left arm joints, [7:29] left hand joints. Note that state i
 joint angles while the action's wrist part is a pose delta -- the two are NOT
 isomorphic and must never be assigned to each other.
 
-Camera slots: wrist -> left_wrist_0_rgb, head -> base_0_rgb.
-The wrist camera is this rig's PRIMARY view (HANDOFF.md section 4: it is the only
-view whose extrinsics are consistent across platforms, and it has no fixed-viewpoint
-shortcut). Only slot names exist as far as the model is concerned, so this mapping
-is simply correct rather than a concession -- but it does mean the highest-information
-image on this rig arrives through left_wrist_0_rgb, which inverts the usual intuition
-that the base view is the important one. The D1 ablation (wrist-only / head-only /
-both) hangs off this layer.
+Camera slots: wrist -> left_wrist_0_rgb, head -> base_0_rgb. Both are fed to the
+model; the right wrist slot is zero-padded and masked out. Which of the two views
+actually carries the task signal is an open question -- the D1 ablation (wrist-only /
+head-only / both) hangs off this layer.
 """
 
 import dataclasses

@@ -17,7 +17,7 @@
 # Sharpa × π0.5 集成的测试 + 变异扫描（sharpa-pi05-plan.md Task 0/2/3/4）。
 #
 # 为什么要 sbatch：openpi 的套件光 import jax 就要 1–2 分钟，变异扫描要跑十几遍，
-# 登录节点不跑计算（HANDOFF.md §11）。
+# 登录节点不跑计算。
 #
 # 本作业只读代码、跑测试，产物只有日志；变异扫描每次都从 /tmp 的原件还原。
 # ⚠️ 如果作业在变异中途被 SIGKILL，
@@ -57,7 +57,7 @@ timeout 900 env -u PYTHONPATH \
 echo "tactile_steering pytest exit=$?"
 
 echo
-echo "########## 3. 变异扫描（护栏必须能失败，HANDOFF.md §12）##########"
+echo "########## 3. 变异扫描（护栏必须能失败）##########"
 bash "$OPENPI/scripts/sharpa_mutation_sweep.sh"
 SWEEP=$?
 echo "mutation sweep exit=$SWEEP"
