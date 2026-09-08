@@ -4,7 +4,7 @@
 
     ~/openarm/openarm_track/rollout/
 
-包括 `main.py`、`ping_policy.py`、`probe_hand_units.py`、离线测试、
+包括 `cli.py`（原来是 `main.py`，后来在那边被拆开）、`ping_policy.py`、`probe_hand_units.py`、离线测试、
 `RUNBOOK.md`（逐步带判据的操作手册）和 `README.md`（架构说明）；其中
 `golden_trace.npz` 与 `GOLDEN.md` 固定了迁移前的行为基线，`golden_test.py`
 就是拿它来做校验的。
