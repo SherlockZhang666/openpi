@@ -4,8 +4,10 @@
 
     ~/openarm/openarm_track/rollout/
 
-包括 `main.py`、`ping_policy.py`、`probe_hand_units.py`、四个离线测试、
-`RUNBOOK.md`（逐步带判据的操作手册）和 `README.md`（架构说明）。
+包括 `main.py`、`ping_policy.py`、`probe_hand_units.py`、离线测试、
+`RUNBOOK.md`（逐步带判据的操作手册）和 `README.md`（架构说明）；其中
+`golden_trace.npz` 与 `GOLDEN.md` 固定了迁移前的行为基线，`golden_test.py`
+就是拿它来做校验的。
 
 **为什么搬走。** 这份客户端 import 的是 rig 自己的 `collect/` 模块 —— `RosSources`、
 `StateReceiver`、`camera.resolve_device` —— 也就是当初录训练数据的那几个读取器。
