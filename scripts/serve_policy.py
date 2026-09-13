@@ -5,6 +5,7 @@ import socket
 
 import tyro
 
+from openpi.policies import candidate_policy as _candidate_policy
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
 from openpi.serving import websocket_policy_server
@@ -50,6 +51,12 @@ class Args:
     port: int = 8000
     # Record the policy's behavior for debugging.
     record: bool = False
+
+    # Candidate chunks per request and the flow-matching noise temperature (see
+    # openpi/policies/candidate_policy.py). The defaults (1, 1.0) leave the server exactly as
+    # upstream; a client can also override both per request.
+    num_candidates: int = 1
+    noise_temperature: float = 1.0
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
@@ -98,7 +105,16 @@ def create_policy(args: Args) -> _policy.Policy:
 
 def main(args: Args) -> None:
     policy = create_policy(args)
-    policy_metadata = policy.metadata
+    policy_metadata = {
+        **policy.metadata,
+        "candidate_sampling": {
+            "num_candidates": args.num_candidates,
+            "noise_temperature": args.noise_temperature,
+        },
+    }
+    policy = _candidate_policy.CandidatePolicy(
+        policy, num_candidates=args.num_candidates, noise_temperature=args.noise_temperature
+    )
 
     # Record the policy's behavior.
     if args.record:
