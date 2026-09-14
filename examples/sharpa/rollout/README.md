@@ -73,3 +73,22 @@ N>1 或 T≠1 时响应多出这些键：
 - **每个新 N 都要重新 JIT 编译**（几十秒）。机器人使能之前，用实际要跑的 N 先预热一次。
 
 T≠1 时候选来自另一个分布：best-of-N 不受影响；加权重采样要做 `π/π_T` 修正（HANDOFF §7）。
+
+## 随机（SDE）采样：`sde_eta`（分支 `sharpa-rollout-sde`，2026-09-13）
+
+默认的采样器是确定性的：从初始噪声出发，10 步 Euler 积分 flow ODE，积分过程中不再有随机性。
+`sde_eta` ∈ [0, 1] 换成 DDIM-η 式的随机采样器（`src/openpi/models/pi0.py::flow_ddim_eta_step`）：
+每一步由速度还原出 x̂₀ 与 ε̂，再按 q(x_{t'} | x_t, x̂₀) 走下一步并注入新噪声。
+
+    scripts/sharpa_serve.sh <ckpt>/<step> sharpa_egg --num-candidates 4 --sde-eta 0.5
+
+也可以在请求里带 `sde_eta`。**默认 0 = 原来的采样器，逐位不变**；`sde_eta` 只对 JAX 模型有效（PyTorch 模型会报错）。
+**不需要重训**：用的是同一个速度场，只换了推理时的积分方式。
+
+⚠️ **它不是「让候选更分散」的旋钮。** 模型准确时，η 取任何值采到的都是**同一个分布**；η 改变的是怎么采，
+不是采哪个分布。而且步数少时它往往让样本**更集中**：一维高斯上用解析速度场实测（10 步），
+样本标准差 η=0 为 0.247、η=1 为 0.219（真值 0.3）；步数加到几百步后各 η 都收敛到 0.3。
+要比策略本身更分散，只能换分布（例如 `noise_temperature`）。η 值不值得用，先离线量候选散布
+（`tactile_steering/dp2/dp2b_candidates.py`）再决定。
+
+⚠️ `sde_eta > 0` 时每一步的噪声不在 `candidate_noise` 里，**候选不能再只凭 `candidate_noise` 复现**。

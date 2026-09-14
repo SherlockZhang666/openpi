@@ -374,8 +374,12 @@ class PI0Pytorch(nn.Module):
         return F.mse_loss(u_t, v_t, reduction="none")
 
     @torch.no_grad()
-    def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
+    def sample_actions(self, device, observation, noise=None, num_steps=10, sde_eta=None) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
+        if sde_eta is not None:
+            # tactile-steering: the stochastic DDIM-eta sampler exists only in the JAX model
+            # (models/pi0.py flow_ddim_eta_step). Refuse rather than silently run the deterministic one.
+            raise NotImplementedError("sde_eta is implemented for the JAX pi0/pi05 model only")
         bsize = observation.state.shape[0]
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)

@@ -111,6 +111,33 @@ def test_request_keys_override_defaults_and_never_reach_transforms(setup):
     assert "actions_candidates" not in policy.infer(req)
 
 
+def test_sde_eta_changes_candidates_and_is_reported(setup):
+    make, obs, _ = setup
+    ode = cp.CandidatePolicy(make(seed=7), num_candidates=3).infer(_copy(obs))
+    sde = cp.CandidatePolicy(make(seed=7), num_candidates=3, sde_eta=1.0).infer(_copy(obs))
+    assert ode[cp.SDE_ETA_KEY] == 0.0
+    assert sde[cp.SDE_ETA_KEY] == 1.0
+    # same seed -> same initial noise; only the per-step noise differs
+    np.testing.assert_array_equal(ode["candidate_noise"], sde["candidate_noise"])
+    assert not np.allclose(ode["actions_candidates"], sde["actions_candidates"])
+
+
+def test_sde_eta_alone_takes_the_candidate_path(setup):
+    make, obs, _ = setup
+    req = _copy(obs)
+    req[cp.SDE_ETA_KEY] = 0.5
+    out = cp.CandidatePolicy(make()).infer(req)
+    assert out["actions_candidates"].shape[0] == 1
+    assert out[cp.SDE_ETA_KEY] == 0.5
+
+
+@pytest.mark.parametrize("eta", [-0.1, 1.5, float("nan")])
+def test_invalid_sde_eta_raises(setup, eta):
+    make, _, _ = setup
+    with pytest.raises(ValueError, match="sde_eta"):
+        cp.CandidatePolicy(make(), sde_eta=eta)
+
+
 @pytest.mark.parametrize(("n", "t"), [(0, 1.0), (2, -0.1), (2, float("nan")), (2, float("inf"))])
 def test_invalid_arguments_raise(setup, n, t):
     make, obs, _ = setup

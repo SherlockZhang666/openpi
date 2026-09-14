@@ -59,23 +59,37 @@ from openpi.policies import policy as _policy
 
 NUM_CANDIDATES_KEY = "num_candidates"
 TEMPERATURE_KEY = "noise_temperature"
+# Stochastic sampler (models/pi0.py flow_ddim_eta_step): 0 = the deterministic Euler sampler, 1 = ancestral.
+# It samples the SAME distribution as eta=0 when the model is exact -- it changes how candidates are drawn,
+# not how far apart they can be. JAX models only.
+SDE_ETA_KEY = "sde_eta"
 
 
-def _validate(num_candidates: int, noise_temperature: float) -> None:
+def _validate(num_candidates: int, noise_temperature: float, sde_eta: float = 0.0) -> None:
     if num_candidates < 1:
         raise ValueError(f"num_candidates must be >= 1, got {num_candidates}")
     if not math.isfinite(noise_temperature) or noise_temperature < 0:
         raise ValueError(f"noise_temperature must be finite and >= 0, got {noise_temperature}")
+    if not math.isfinite(sde_eta) or not 0.0 <= sde_eta <= 1.0:
+        raise ValueError(f"sde_eta must be in [0, 1], got {sde_eta}")
 
 
 class CandidatePolicy(_base_policy.BasePolicy):
     """Wraps a `Policy` so one request can return N candidates at a chosen noise temperature."""
 
-    def __init__(self, policy: _policy.Policy, *, num_candidates: int = 1, noise_temperature: float = 1.0):
-        _validate(num_candidates, noise_temperature)
+    def __init__(
+        self,
+        policy: _policy.Policy,
+        *,
+        num_candidates: int = 1,
+        noise_temperature: float = 1.0,
+        sde_eta: float = 0.0,
+    ):
+        _validate(num_candidates, noise_temperature, sde_eta)
         self._policy = policy
         self._default_n = int(num_candidates)
         self._default_t = float(noise_temperature)
+        self._default_eta = float(sde_eta)
 
     @property
     def metadata(self) -> dict[str, Any]:
@@ -86,20 +100,24 @@ class CandidatePolicy(_base_policy.BasePolicy):
         obs = dict(obs)
         n = int(obs.pop(NUM_CANDIDATES_KEY, self._default_n))
         t = float(obs.pop(TEMPERATURE_KEY, self._default_t))
-        _validate(n, t)
-        if n == 1 and t == 1.0:
+        eta = float(obs.pop(SDE_ETA_KEY, self._default_eta))
+        _validate(n, t, eta)
+        if n == 1 and t == 1.0 and eta == 0.0:
             return self._policy.infer(obs)
-        return _sample_candidates(self._policy, obs, n, t)
+        return _sample_candidates(self._policy, obs, n, t, eta)
 
 
-def _sample_candidates(policy: _policy.Policy, obs: dict, n: int, t: float) -> dict:
+def _sample_candidates(policy: _policy.Policy, obs: dict, n: int, t: float, eta: float = 0.0) -> dict:
     inputs = policy._input_transform(jax.tree.map(lambda x: x, obs))
     # Same batching as Policy.infer, but N copies of the one observation instead of one.
     inputs = jax.tree.map(lambda x: np.repeat(np.asarray(x)[np.newaxis, ...], n, axis=0), inputs)
 
     model = policy._model
     shape = (n, model.action_horizon, model.action_dim)
-    sample_kwargs = {k: v for k, v in policy._sample_kwargs.items() if k != "noise"}
+    sample_kwargs = {k: v for k, v in policy._sample_kwargs.items() if k not in ("noise", "sde_eta")}
+    if eta > 0.0:
+        # Only passed when on: sde_eta=None is what keeps the model on its unchanged Euler path.
+        sample_kwargs["sde_eta"] = eta
 
     if policy._is_pytorch_model:
         device = policy._pytorch_device
@@ -136,6 +154,7 @@ def _sample_candidates(policy: _policy.Policy, obs: dict, n: int, t: float) -> d
             "candidate_noise": noise.astype(np.float32),
             NUM_CANDIDATES_KEY: n,
             TEMPERATURE_KEY: t,
+            SDE_ETA_KEY: eta,
             "policy_timing": {"infer_ms": model_ms},
         }
     )

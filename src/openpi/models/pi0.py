@@ -221,7 +221,11 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        sde_eta: float | at.Float[at.Array, ""] | None = None,
     ) -> _model.Actions:
+        # tactile-steering: sde_eta=None (default) is the unchanged deterministic Euler sampler. A number
+        # switches to the stochastic DDIM-eta sampler (see flow_ddim_eta_step). None vs number is decided at
+        # trace time (None is not a traced leaf), so the default path is untouched bit for bit.
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
@@ -237,7 +241,7 @@ class Pi0(_model.BaseModel):
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
         def step(carry):
-            x_t, time = carry
+            x_t, time = carry[0], carry[1]
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
@@ -268,12 +272,42 @@ class Pi0(_model.BaseModel):
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-            return x_t + dt * v_t, time + dt
+            if sde_eta is None:
+                return x_t + dt * v_t, time + dt
+            key, sub = jax.random.split(carry[2])
+            xi = jax.random.normal(sub, x_t.shape, x_t.dtype)
+            x_next = flow_ddim_eta_step(x_t, v_t, time, jnp.maximum(time + dt, 0.0), sde_eta, xi)
+            return x_next.astype(x_t.dtype), time + dt, key
 
         def cond(carry):
-            x_t, time = carry
+            time = carry[1]
             # robust to floating-point error
             return time >= -dt / 2
 
-        x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        return x_0
+        # the per-step noise gets its own key, independent of the draw of the initial noise
+        init = (noise, 1.0) if sde_eta is None else (noise, 1.0, jax.random.fold_in(rng, 1))
+        return jax.lax.while_loop(cond, step, init)[0]
+
+
+def flow_ddim_eta_step(x_t, v_t, t, t_next, eta, xi):
+    """One stochastic step of the flow sampler, DDIM-eta style (tactile-steering, 2026-09-13).
+
+    Convention of this file: x_t = t * eps + (1 - t) * x_0 (t=1 noise, t=0 data) and the model predicts
+    v = eps - x_0. From v:  x0_hat = x_t - t * v,  eps_hat = x_t + (1 - t) * v.  The next point is
+
+        x_{t'} = (1 - t') * x0_hat + sqrt(t'^2 - s^2) * eps_hat + s * xi,     xi ~ N(0, I)
+
+    with s = eta * sigma_post and sigma_post^2 = (t'^2 / t^2) * (t^2 - ((1 - t) / (1 - t'))^2 * t'^2), the
+    variance of q(x_{t'} | x_t, x_0) on this Gaussian path.
+      eta = 0: exactly the Euler step x_t + (t' - t) * v, i.e. the deterministic sampler.
+      eta = 1: ancestral sampling.
+    For eta in [0, 1] the per-step marginal is the path's own when x0_hat / eps_hat are exact, so eta changes
+    how a sample is drawn, not which distribution it comes from. It is NOT a knob for "more diverse than the
+    policy" -- that needs a different distribution (e.g. scaling the initial noise).
+    """
+    a_t, a_n = 1.0 - t, 1.0 - t_next
+    var_post_scaled = jnp.maximum(t**2 - (a_t / a_n) ** 2 * t_next**2, 0.0)
+    s = jnp.minimum(eta * jnp.sqrt(var_post_scaled) * t_next / t, t_next)
+    x0_hat = x_t - t * v_t
+    eps_hat = x_t + a_t * v_t
+    return a_n * x0_hat + jnp.sqrt(jnp.maximum(t_next**2 - s**2, 0.0)) * eps_hat + s * xi

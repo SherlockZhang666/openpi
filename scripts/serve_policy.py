@@ -57,6 +57,8 @@ class Args:
     # upstream; a client can also override both per request.
     num_candidates: int = 1
     noise_temperature: float = 1.0
+    # Stochastic (DDIM-eta) flow sampler, in [0, 1]. 0 = the unchanged deterministic sampler.
+    sde_eta: float = 0.0
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
@@ -110,10 +112,14 @@ def main(args: Args) -> None:
         "candidate_sampling": {
             "num_candidates": args.num_candidates,
             "noise_temperature": args.noise_temperature,
+            "sde_eta": args.sde_eta,
         },
     }
     policy = _candidate_policy.CandidatePolicy(
-        policy, num_candidates=args.num_candidates, noise_temperature=args.noise_temperature
+        policy,
+        num_candidates=args.num_candidates,
+        noise_temperature=args.noise_temperature,
+        sde_eta=args.sde_eta,
     )
 
     # Record the policy's behavior.
