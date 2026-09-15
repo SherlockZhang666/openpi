@@ -76,6 +76,96 @@ $V/.venv/bin/python ping_policy.py --n 40
 首次调用 36 秒是 XLA 编译，正常，**每次重起 server 都要重来一遍**。所以别等机器人已经使能了
 才第一次连 —— 在第 3 步之前就把 server 预热好。
 
+### 1b · 换成 diffusion policy（baseline_dp）时，第 1 步改成这样
+
+server 用 rig 的 lerobot venv（这台机器上唯一能在 RTX 5090 上跑 torch 的），不是 openpi 的：
+
+```bash
+# 终端 1
+cd /home/yiming/Public/baseline_dp
+./serve_dp.sh trained_model/checkpoint_epoch_300 --sampler ddim --steps 20 --samples 4   # 真跑用这个，~75 ms
+# DDPM 50 步（离线 157 ms，真跑时量到 215-300 ms，每个 chunk 边界都 stall）：
+./serve_dp.sh trained_model/checkpoint_epoch_300
+# 训练时的完整 100 步（~315 ms 一个 chunk，任何 lead 都装不下）：
+./serve_dp.sh trained_model/checkpoint_epoch_300 --steps 100
+```
+
+**判据**：`serving on ws://0.0.0.0:8000 ({'model': 'dp', 'horizon': 16, 'obs_horizon': 2, ...`
+一行里要有 `'sampler'` 和 `'warmup_ms'`。`norm_stats.json` 缺失时脚本直接拒绝启动（训练脚本把
+归一化统计量写死在 `train.py` 里，checkpoint 自己不带）—— 第一次跑先
+`<venv>/bin/python dp_policy.py --write-norm-stats trained_model/checkpoint_epoch_300`。
+
+```bash
+# 终端 2（不需要 ROS）
+cd /home/yiming/Public/baseline_dp
+V_DP=/home/yiming/openarm/openarm_track/vr/.venv-lerobot/bin/python
+$V_DP ping_dp.py --n 20                                   # 延迟 + 量程
+$V_DP ping_dp.py --replay ~/openarm/data/engaged/20260903_002436_pick_up_the_egg/ep_0008
+```
+
+**判据**：第一条 `OK -- p95 inference fits in 200 ms`（`--infer-lead 6` 的预算，dp 的默认值）；
+第二条 `OK -- the served policy reproduces the commanded wrist trajectory`，腕部误差 policy 列
+明显小于 hold-current 列（正常是 2.5-3 mm 对 4.5-5 mm）。replay 走的是客户端一模一样的
+payload，关节列、帧序、resize、反归一化任何一处接错都会在这里变成几十毫米。
+
+第 8、9 步的命令把 `--prompt "pick up the egg"` 换成 `--backend dp`，**去掉** `--hand-norm-stats`
+（统计量从握手里来，带了会被拒），真跑加 `--wrist-step-lin 60 --wrist-step-ang 20 --wrist-slew-lin 6 --wrist-slew-ang 2`（见下）。dry run 判据第 1 条 head 变成 `640x400`（dp 的默认
+`--image-short-side 400`），第 3 条预算变成 200 ms。
+
+⚠️ **场景要和训练一致**（`reference_start_scene.png`：鸡蛋放在指尖前方约一个手掌的距离、桌子中部，
+碗在鸡蛋右上）。dp 输出的是绝对目标位姿，而且它是**从头部相机画面**里读腕部位置的（关节状态几乎
+不影响）：鸡蛋/碗摆得和训练不一样，第一个 target[0] 就会偏几厘米，离链的当前位姿超过
+20 mm / 5.7° 就在第 0 步被单步护栏拦下 —— 那是护栏在工作，不是 bug。
+
+真跑之前先用只读工具看一眼（要 ROS、server 在跑、rig 起着；不发任何指令）：
+
+```bash
+$V/.venv/bin/python check_dp_start.py
+```
+
+它打出策略的 target[0] 到 FK(q_meas) 的距离，并把当前画面存到 `/tmp/dp_start_live.png`
+对照 reference。个位数毫米最好；超过 20 mm 它会说 NOT READY。2026-09-11 实测：场景对齐后
+第一步仍有 18 mm / 6.3°（策略自身的感知误差），转角刚好超过 5.7° 的护栏，所以真跑要带
+`--wrist-step-lin 30 --wrist-step-ang 10`。这两个 flag 会把单步腕部护栏放宽到 30 mm / 10°，
+对整个 run 的每一步都生效，跑飞时被拦得晚一点 —— 只放这么多，够第一步用就行。
+
+**真跑还要带 `--wrist-slew-lin 6 --wrist-slew-ang 2`**（2026-09-11 run 004 的结论）。dp 输出的是绝对
+目标，相邻两个 chunk 对"腕该在哪"的判断差几毫米（训练数据上离线量到 3.6 mm 中位），在真机上会
+放大成振荡：chunk 边界跳一下 → 伺服滞后冲到 3 cm → 下一个 chunk 从画面里看到滞后的臂就往回拉 →
+再下一个往前推，边界跳到 5-21 mm，抓蛋时 35 mm 被护栏拦停。slew 把链向目标的逼近限到每步 6 mm /
+2°（训练数据单步最大 4.6 mm / 1.3°，分布内的动作碰不到它），边界的跳变变成几步训练速度的走位；
+单步护栏照旧看**原始**距离，跑飞照样停。pi0.5 的增量指令不受影响。
+
+server 也换成 DDIM-20 并加 `--samples 4`：真跑时 DDPM-50 量到 215-300 ms（离线 157），每个 chunk
+边界都 stall；DDIM-20 真机上 78 ms。`--samples 4` 把同一观测的 4 次采样在一个 batch 里平均
+（73 ms，不多花时间），离线把相邻 chunk 的分歧从中位 3.3 / 最大 8.7 mm 压到 2.3 / 4.4 mm。
+
+run 005 / 006（带 slew）都走到了鸡蛋并合拢手指，然后在抓取瞬间被护栏拦下：那一刻腕部被手指
+半遮住，相邻 chunk 的原始分歧到了 30 mm 和 40 mm / 12°。有了 slew，实际运动始终不超过每步
+6 mm / 2°，单步护栏只是在检查"目标一致性"而不是限速，所以真跑放到
+`--wrist-step-lin 60 --wrist-step-ang 20`；累积包络（离锚点 45 cm / 1.8 rad）不变。
+
+### 1c · π0.5 多候选（N=4, T=1.0）时，第 1 步改成这样
+
+第 9b 步（第三轮多候选）用这组。温度批次改成 T=1.5 / 2.0 时只改 `--noise-temperature`。
+
+```bash
+# 终端 1
+cd $OPENPI
+scripts/sharpa_serve.sh ./checkpoints/sharpa-pi05/egg_70ep_b64/15120 sharpa_egg \
+    --num-candidates 4 --noise-temperature 1.0
+```
+
+```bash
+# 终端 2
+cd ~/openarm/openarm_track/rollout
+$V/.venv/bin/python ping_policy.py --n 40 --num-candidates 4
+```
+
+**判据**：同第 1 步 —— `Loaded norm stats from .../15120/assets/...`、`server listening on 0.0.0.0:8000`；
+ping 出 `OK -- p95 inference fits in 267 ms`，没有 `CHUNK PROBLEMS`。第一次调用是 N=4 的 JIT 编译（几十秒），不计入。
+本机实测 N=4 p50 202 / p95 247 ms；ping 出五六百毫秒说明 openpi 不是带共享前缀采样的版本（见 9b ②）。
+
 ---
 起CAN：
 ```
@@ -172,11 +262,14 @@ $V/scripts/both_to_home.sh
 $V/scripts/collect_up.sh preflight
 ```
 
-这是**采集**用的检查表，对 rollout 有两项会红，**都可以忽略**：
+这是**采集**用的检查表，对 rollout 有一项会红，**可以忽略**：
 
 - `no Quest on adb` —— rollout 不用 Quest。
-- `nothing owns :50011 -- Sharpa Pilot is not running` —— 那是触觉 tap 的前提。base policy
-  不吃触觉（`observation.tactile_force` 在数据集里，但这个策略不消费它）。
+
+⚠️ **`nothing owns :50011 -- Sharpa Pilot is not running` 从第三轮起不能再忽略。** policy 不吃触觉，
+但每次录制的 rollout 都要把触觉（F6 + 形变图）录进 `episode.hdf5`，Pilot 和 tap 必须在跑，见 §9b。
+只有明确带 `--no-tactile`（台架测试）才可以不开。**`--backend dp` 默认不录触觉、不需要 tap 和 Pilot**
+（要录就加 `--with-tactile`）；T-Rex 一直需要触觉。
 
 **rollout 真正要看绿的四项**：
 
@@ -300,20 +393,21 @@ $V/.venv/bin/python cli.py \
     --prompt "pick up the egg" \
     --hand-units rad \
     --hand-norm-stats $OPENPI/checkpoints/sharpa-pi05/egg_70ep_b64/15120/assets/local_repo/norm_stats.json \
-    --enable-hand --enable-arm \
-    --record ~/openarm/rollouts/egg_15120_001.npz
+    --enable-hand --enable-arm
 ```
 
 - `--hand-units` 用第 3 步测出来的值。
 - `--hand-norm-stats` **每次都带**。它把手指包络从固件的 ±π/2 收到策略实际训练过的逐关节范围
   —— 比如 `index_MCP_AA` 从 ±1.571 收到 `[-0.28, +0.20]`，八倍。不带的话客户端会退回固件钳位
   并打 warning。
-- **录制现在默认开着**（只要带了 `--enable-arm` 或 `--enable-hand`）。每次跑会在
-  `~/openarm/rollouts/<时间戳>_<prompt>/` 下留四样东西：
+- **录制现在默认开着**（只要带了 `--enable-arm` 或 `--enable-hand`），**不用再写 `--record`**。
+  每次跑会自动建一个 `<backend>_<任务>_<日期-时间>/` 目录。**pi0.5 的全部存在
+  `~/openarm/rollouts/pi0.5/` 下**，和 dp / T-Rex（仍在 `~/openarm/rollouts/` 下）分开，例如
+  `~/openarm/rollouts/pi0.5/pi0.5_egg_T1.0_ode_20260914-153012/`。`--record-dir <目录>` 可以改放别处。里面留这几样东西：
 
   | 文件 | 是什么 |
   |---|---|
-  | `flight.npz` | 逐步的 state / 指令 / 实发指令，啮合锚点与 `--node-scale`（腕部轨迹靠它们还原到基坐标）。小、写得快 |
+  | `pi0.5_egg_T1.0_ode_20260914-153012.npz`（与目录同名） | 逐步的 state / 指令 / 实发指令，啮合锚点与 `--node-scale`（腕部轨迹靠它们还原到基坐标）。小、写得快 |
   | `head.jpgs` `wrist.jpgs` | 策略**实际看到**的画面，每个控制步一帧，跑的过程中就在往下写（约 14 MB/分钟）|
   | `plots.png` | EE 位姿（指令 vs FK 实测 vs 两者之差）、7 个臂关节、22 个手关节、手部指令残差热图 |
 
@@ -328,7 +422,8 @@ $V/.venv/bin/python cli.py \
   第 N 帧就是第 N 步 —— 可以停在某一帧再去查那一步的数字。`mpv` / `vlc` / 浏览器都能放。
 
   `--no-record` 全关，`--no-frames` 只留数组（就没有视频可做了），`--no-plot` 跳过出图。
-  dry run 默认**不**录（通常是连着调第五次），要录就显式给 `--record <目录>`。
+  dry run 默认**不**录（通常是连着调第五次），要录就显式给 `--record <目录>`；
+  给 `--record <路径>/<名字>.npz` 则建 `<名字>/<名字>.npz`，用自己起的名字代替自动名。
   图也可以事后重画：`<rig>/.venv/bin/python plot_rollout.py <运行目录>`
   —— 必须用 rig 的解释器，它是这台机器上唯一同时有 pinocchio（做 FK）和 matplotlib 的。
 
@@ -336,6 +431,143 @@ $V/.venv/bin/python cli.py \
 **`q`** 退出。
 
 🚫 **要停就按 `p` 或 `q`，不要 Ctrl-C 终端 4。**
+
+---
+
+## 9b · 第三轮：π0.5 多候选 + 触觉录制 × 30（handoff-round3 §3）
+
+和第 9 步是同一条链路，多出来的只有下面这些。**每批 30 次：同一个 checkpoint（15120）、同一个 N、同一个 T。**
+
+批次顺序：**先 T=1.0 × 30**，再 T=1.5 × 30、T=2.0 × 30（只改 `--noise-temperature`，其余不动）。
+采样器一律用默认的确定性 ODE（`sde_eta=0`，openpi `sharpa-rollout-sde` 分支的默认值；客户端不发 `sde_eta`）。
+鸡蛋只放在训练数据覆盖的小范围内 —— π0.5 训练集里鸡蛋位置分布本来就窄，先不往外扩。
+
+**① server 带候选默认值起**（终端 1，替换第 1 步的命令）：
+
+```bash
+scripts/sharpa_serve.sh ./checkpoints/sharpa-pi05/egg_70ep_b64/15120 sharpa_egg \
+    --num-candidates 4 --noise-temperature 1.0
+```
+
+**② 用实际的 N 测延迟**（终端 2）。第一次调用是这个 N 的 JIT 编译（几十秒），不计入：
+
+```bash
+$V/.venv/bin/python ping_policy.py --n 40 --num-candidates 4
+```
+
+判据：`OK -- p95 inference fits in 267 ms`，没有 `CHUNK PROBLEMS`。**N 定下来之后 30 次都不改。**
+
+本机（RTX 5090 Laptop）2026-09-14 实测，走 websocket：N=4 **p50 202 / p95 247 ms**，`--infer-lead 8` 放得下。
+这靠的是服务端的**共享前缀**采样（`candidate_policy.py`：图像+prompt 的 VLM 前缀只算一次，KV cache 复制给 N 个候选，
+只有去噪按 N 路跑）。openpi 没有这个改动时 N=4 是 p50 571 / p95 646 ms，放不下 —— ping 出来五六百毫秒就先检查
+openpi 是不是最新的。
+
+真跑时偶尔一次推理超预算只会打一行 `inference was not ready at the chunk boundary`，那个边界晚一点接上；
+如果这行**频繁**出现，改用 `--infer-lead 9`（300 ms 预算，`--chunk-steps` 仍是 15），并在 notes 里记下。
+
+**③ Pilot + 触觉 tap**（新开终端 7，无 ROS）。Pilot 开着、**触觉/形变视图打开**（设备只在有人请求时才算形变图）：
+
+```bash
+sudo $V/.venv/bin/python $V/collect/sharpa_tap.py --serve /tmp/sharpa_tap.sock --stats
+```
+
+判据：`collect_up.sh preflight` 里 `Sharpa Pilot owns :50011` 为绿，`/tmp/sharpa_tap.sock` 存在。
+
+**④ 真跑**（终端 6）：
+
+```bash
+$V/.venv/bin/python cli.py \
+    --prompt "pick up the egg" \
+    --hand-units rad \
+    --hand-norm-stats $OPENPI/checkpoints/sharpa-pi05/egg_70ep_b64/15120/assets/local_repo/norm_stats.json \
+    --enable-hand --enable-arm \
+    --num-candidates 4 --noise-temperature 1.0
+```
+
+上面这条要先 `cd ~/openarm/openarm_track/rollout`，不然会报 `can't open file '.../cli.py'`
+（收完手常常停在 `vr/` 下）。**不想管当前目录，就用绝对路径**，在哪个目录都能跑：
+
+```bash
+$V/.venv/bin/python ~/openarm/openarm_track/rollout/cli.py \
+    --prompt "pick up the egg" \
+    --hand-units rad \
+    --hand-norm-stats $OPENPI/checkpoints/sharpa-pi05/egg_70ep_b64/15120/assets/local_repo/norm_stats.json \
+    --enable-hand --enable-arm \
+    --num-candidates 4 --noise-temperature 1.0
+```
+
+换批次时只把 `--noise-temperature` 改成 1.5 / 2.0（SDE 采样器再加 `--sde-eta 0.5` 之类，默认 0 = ODE）。
+
+**运行目录按采样设置命名**：`~/openarm/rollouts/pi0.5/pi0.5_egg_T<温度>_<ode|sde<eta>>_<日期-时间>/`，例如
+`pi0.5_egg_T1.0_ode_20260914-212616`、`pi0.5_egg_T1.5_ode_...`、`pi0.5_egg_T2.0_sde0.5_...`，npz 与目录同名，
+各批次在盘上一眼分得开（`ls ~/openarm/rollouts/pi0.5 | grep T1.5_ode`）。名字不是凭参数猜的：客户端核对 server
+回报的实际 T / sde_eta，和请求不一致就停下（例如 server 用 `--sde-eta` 起的，客户端却没带），不会让一批数据挂错名字。
+`--noise-temperature` / `--sde-eta` 必须和 `--num-candidates` 一起给。2026-09-14 之前录的 9 条已按文件里记录的
+T=1.0、server 默认 sde_eta=0 改名为 `..._T1.0_ode_...`（`index.jsonl` 和 hdf5 里的 `rollout.run_dir` 同步改了）。客户端每次请求都带 T，会覆盖 server 的默认值。
+`--selection-seed` 不用给：每条 episode 自动取一个新 seed，打在日志里并写进文件。
+
+**⑤ 一次运行的流程**（客户端自己按这个顺序走，操作员只管看日志和按键）：
+
+| 阶段 | 日志 | 操作员 |
+|---|---|---|
+| 触觉检查 | 5 根手指都在推数据，否则直接退出并说原因 | — |
+| 预热 | `warming the server up with N=4` → `warm-up done` | 等（换 N 后第一次几十秒） |
+| **首段自由空间** | `FREE SPACE: hand open, touching NOTHING, for 2.0 s` | 手张开，什么都别碰 |
+| rollout | 同第 9 步；`p` 暂停、`q` 结束 | **失败也跑完整条，不要中途放弃重来** |
+| **结束** | 按 **`q`**（不要 Ctrl-C） | 觉得动作做完了就按一下 `q` |
+| **尾段自由空间** | `recording 2.0 s of tail` | **什么都不用做**，没人碰机器人。手上还有受力（蛋没放下）会打 `tail: fingers still loaded` 并记进文件 |
+| **当场标注** | 菜单 `1 success … 6 other` | 选一个；`other` 要写一句话 |
+
+**每次结束后的复原顺序**（server、tap、bring-up 一直开着不动）：
+
+1. 终端 6 标注完，客户端退出。臂由 teleop 节点保持，手保持最后的指令、Control Source 留在 SDK。
+2. `$V/scripts/after_teleop_home.sh`：停节点 → 切 JTC → 臂回 home → 手回 home → **手交还 IDLE**。
+   如果它说 `没有需要收的臂`（节点已经自己退出、臂已回到 JTC），用 **`after_teleop_home.sh left`** 显式指定。
+   如果终态打印 **`臂已到位，但收手失败`**：臂已经在 home，只是手没收（例如偶发的
+   `Failure to connect to server for current_coeff`，SDK 这一条指令没送到手上，手指没动）。
+   **不用重跑整个脚本**，单独重跑收手：`cd $V && ./.venv/bin/python hand_home.py --send`，
+   结尾看到 `control source -> IDLE` 即可。连续失败再查手的网线 / Pilot。
+3. 摆下一个鸡蛋位置。
+4. 终端 5 **重起 teleop 节点**（第 7 步，`preflight_udp.sh 9873` + 带 `--home-on-start` 的那条）—— 上一步把它停了。
+5. 终端 6 跑下一次。
+
+Pilot 底部状态栏的 Control Source 保持 **IDLE / 空闲**（左边栏的 Sliders / Glove 只是界面，不是 Control Source）。
+2026-09-14 起客户端和收手脚本都先切 SDK 再设参数，即使停在 APP 也能接管；不要选 GLOVE。
+
+安全包络触发、`stale observation` 停止也会走到尾段和标注菜单 —— **照常标注，不要删**；
+停止原因和步号、每次 `p` 暂停/恢复的步号都自动记在事件里。标注时 Ctrl-C 会存成 `unlabeled`，不会丢数据。
+
+free 段里如果有手指 |F| 波动超过 0.5 N，会打 `something touched the hand` 的 warning —— 这条的零点不可信，
+notes 里记一句。
+
+**⑥ 每次运行留下的东西**（`~/openarm/rollouts/pi0.5/pi0.5_egg_T1.0_ode_<日期-时间>/`）：
+
+| 文件 | 内容 |
+|---|---|
+| `episode.hdf5` | **rt-v1 格式**（和采集的 episode 同一个写入器、同一套 schema），传感器线程**固定 30 Hz**，不受控制频率影响：`obs/` `action/` `teleop/` `hand/`（位置/速度/力矩）`action/hand_joint_pos`（客户端发出的手指令）`tactile/f6` `tactile/deform` `tactile/deform_valid`；每个 chunk 边界的 `cand/obs_step` `cand/actions (K,N,30,28)` `cand/noise (K,N,30,32)` `cand/chosen` `cand/exec_steps`（[起, 止) 控制步）`cand/infer_ms`；attrs：`outcome` `events` `tactile_zero_offset` `rollout`（N、T、seed、checkpoint、各种 cadence）`git_openpi` `git_rig` `server_metadata` |
+| `pi0.5_egg_T1.0_ode_<日期-时间>.npz` `head.jpgs` `wrist.jpgs` `plots.png` | 同第 9 步；npz 里也有同名的 `cand/*` 和 `events_json` |
+| `head_first.jpg` `wrist_first.jpg` | 启动时（啮合之前）的场景首帧 |
+| `../index.jsonl` | 每条一行：路径、帧数、`success` |
+
+rt-v1 文件和采集的差别：**没有 MKV**，行时钟是传感器线程；`time/frame_index` 是该行时刻最新的**控制步**
+（= `head.jpgs` 第 k 帧 = `flight.npz` 第 k 行，开始前为 -1）。`attrs["row_clock"]` 写着这件事。
+
+**⑦ 先录 1–2 条传回去确认格式**，再跑剩下的。自查：
+
+```bash
+$V/.venv/bin/python -c "
+import h5py, json, glob
+p = sorted(glob.glob('/home/yiming/openarm/rollouts/pi0.5/*/episode.hdf5'))[-1]
+f = h5py.File(p, 'r'); a = f.attrs
+print(p, a['num_frames'], 'rows', a['outcome'])
+print('tactile valid', f['tactile/valid'][()].all(1).mean(), 'deform_live', json.loads(a['tactile_final'])['deform_live'])
+print('cand', f['cand/actions'].shape, 'chosen', f['cand/chosen'][()], 'seed', f['cand'].attrs['selection_seed'])
+print('events', [e['kind'] for e in json.loads(a['events'])])
+"
+```
+
+判据：`tactile valid` 接近 1.0、`deform_live True`、`cand` 是 `(K, 4, 30, 28)`、`chosen` 不全是 0、events 以
+`free_head_begin` 开头、以 `free_tail_end` 结尾。
 
 ---
 
@@ -395,6 +627,11 @@ rollout 客户端一行没碰。
 | 手指瞬间冲到极限 | `--hand-units` 反了（角度值被当弧度读，差 57.3 倍）。立刻 `q`，重跑第 3 步 |
 | 臂朝错误方向走，但幅度合理 | 四元数 wxyz/xyzw 搞反，或 `--node-scale` 和节点的 `--scale` 对不上。前者有测试钉着（`actions_test.py`），后者查终端 5 的启动参数 |
 | 每个平移都只有预期的一半 | 节点还是 `--scale 0.5` 起的 |
+| `after_teleop_home.sh` 报 `controller_manager 不在` / `这个终端列不出控制器` | **多半不是 bring-up 挂了，是这个终端连不上 ROS。** 先确认：`pgrep -af ros2_control_node` 有进程、`can1` 的 `rx_packets` 每秒涨几千 → bring-up 活着、臂有力矩（2026-09-14 就是这样）。然后在这个终端：`echo $ROS_DOMAIN_ID` 必须是 0（设成别的值脚本不会覆盖）；`ros2 daemon stop && ros2 daemon start`；还不行就新开终端 `conda deactivate` + source ROS 两行 + `export ROS_DOMAIN_ID=0`。**不要为这条去重启 bring-up 或跑 `shutdown_all.sh`** |
+| rollout 标注完、退出时 `Segmentation fault` / `Aborted (core dumped)` / `terminate called without an active exception` | 发生在数据**存完之后**的收尾（手 SDK、GStreamer、rclpy 的原生线程退出顺序），臂和手早已释放。先确认数据：运行目录里有 `episode.hdf5`（不是 `.part`）和同名 `.npz`，用 §9b ⑦ 自查。只缺 `plots.png` 就补画：`$V/.venv/bin/python ~/openarm/openarm_track/rollout/plot_rollout.py <运行目录>`。2026-09-14 起崩溃时会打印各 Python 线程的位置（faulthandler），出图也挪到了子进程 —— 再崩把终端最后一屏贴出来 |
+| 运行目录里只有 `episode.hdf5.part`、没有 npz | 那是 2026-09-14 修掉的 `finish_rt` NameError（那之前的一条）。`.part` 可以救成 `episode.hdf5`（截到最后一次落盘的行，缺 `cand/*`） |
+| `no tactile tap at /tmp/sharpa_tap.sock`，但 `pgrep -af sharpa_tap` 有进程 | 长时间运行的 tap 的 socket 文件被 `/tmp` 清理删了，进程活着但谁也连不上。`sudo pkill -INT -f "sharpa_tap.py --serve"`，再按 §9b ③ 重起 |
+| Pilot 点了 reset 后 Control Source 变成 `APP` | Pilot 自己的行为：Sliders 页的 reset 第一步就是切 MASTER（=APP）。rollout 前后都不要点 reset；客户端和收手脚本 2026-09-14 起先切 SDK 再设参数，APP 下也能接管 |
 
 ---
 

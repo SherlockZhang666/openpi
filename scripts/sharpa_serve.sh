@@ -49,5 +49,8 @@ export GIT_CONFIG_COUNT=4 \
   GIT_CONFIG_KEY_2=filter.lfs.process  GIT_CONFIG_VALUE_2= \
   GIT_CONFIG_KEY_3=filter.lfs.required GIT_CONFIG_VALUE_3=false
 
-exec uv run scripts/serve_policy.py policy:checkpoint \
-    --policy.config="$CONFIG" --policy.dir="$CKPT" "$@"
+# Extra args go BEFORE the `policy:checkpoint` subcommand: they are serve_policy.py's own
+# top-level options (--port, --num-candidates, --noise-temperature, ...), and tyro applies an
+# argument to the subcommand directly preceding it -- after it they are "unrecognized".
+exec uv run scripts/serve_policy.py "$@" policy:checkpoint \
+    --policy.config="$CONFIG" --policy.dir="$CKPT"

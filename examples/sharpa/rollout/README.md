@@ -57,6 +57,7 @@ N>1 或 T≠1 时响应多出这些键：
 | `actions_candidates` | (N, 30, 28) | 全部候选，经过与 `actions` 相同的输出变换 |
 | `candidate_noise` | (N, 30, 32) | 每个候选的初始噪声（可复现：拿它单独调一次 `infer(noise=...)` 就得到同一个候选） |
 | `num_candidates`, `noise_temperature` | 标量 | 本次实际用的值 |
+| `candidate_sampler` | str | `"shared_prefix"`（默认，前缀只算一次）或 `"batched"`（原实现），见 [`shared_prefix_candidates.md`](shared_prefix_candidates.md) |
 
 **客户端要改的**（在机器人仓库里，不在这里）：
 
@@ -66,10 +67,12 @@ N>1 或 T≠1 时响应多出这些键：
 
 ⚠️ 两条代价：
 
-- **延迟随 N 线性涨**：batch=N 会把 VLM 前缀并行重算 N 遍。`egg_70ep_b64/15120` 在 A100-80GB 上实测
-  （10 步去噪，`tactile_steering/dp2/out/dp2b_candidates.md`）：N=1 92 ms、N=4 193 ms（最大 235）、
-  **N=8 310 ms（最大 324）**、N=16 558 ms。客户端的预算是 267 ms（`--infer-lead 8 / --fps 30`）⇒
-  **N=4 放得下，N=8 放不下**（要 `--infer-lead` ≥ 10）。真机的卡不是 A100，**先用 `ping_policy.py` 带上 N 实测**。
+- **延迟随 N 增长**。2026-09-14 起 N 个候选**共用一次 VLM 前缀**（KV cache 复制给 N 路去噪，结果与原来等价），
+  N 的代价主要只剩去噪部分：RTX 5090 Laptop 上经 websocket 实测 N=4 **p50 202 / p95 247 ms**（原实现 571 / 646 ms），
+  N=8 直接调用 p95 237 ms。依据、等价性论证与全部测量见 [`shared_prefix_candidates.md`](shared_prefix_candidates.md)。
+  客户端的预算是 267 ms（`--infer-lead 8 / --fps 30`），余量不大，**先用 `ping_policy.py` 带上 N 实测**。
+  （旧数字供参考：原实现在 A100-80GB 上 N=1 92 ms、N=4 193 ms、N=8 310 ms、N=16 558 ms，
+  `tactile_steering/dp2/out/dp2b_candidates.md`；同步这个改动后需重测。）
 - **每个新 N 都要重新 JIT 编译**（几十秒）。机器人使能之前，用实际要跑的 N 先预热一次。
 
 T≠1 时候选来自另一个分布：best-of-N 不受影响；加权重采样要做 `π/π_T` 修正（HANDOFF §7）。
