@@ -525,7 +525,7 @@ T=1.0、server 默认 sde_eta=0 改名为 `..._T1.0_ode_...`（`index.jsonl` 和
    如果它说 `没有需要收的臂`（节点已经自己退出、臂已回到 JTC），用 **`after_teleop_home.sh left`** 显式指定。
    如果终态打印 **`臂已到位，但收手失败`**：臂已经在 home，只是手没收（例如偶发的
    `Failure to connect to server for current_coeff`，SDK 这一条指令没送到手上，手指没动）。
-   **不用重跑整个脚本**，单独重跑收手：`cd $V && ./.venv/bin/python hand_home.py --send`，
+   **不用重跑整个脚本**，单独重跑收手：`$V/.venv/bin/python $V/hand_home.py --send`（绝对路径，在哪个目录都能跑），
    结尾看到 `control source -> IDLE` 即可。连续失败再查手的网线 / Pilot。
 3. 摆下一个鸡蛋位置。
 4. 终端 5 **重起 teleop 节点**（第 7 步，`preflight_udp.sh 9873` + 带 `--home-on-start` 的那条）—— 上一步把它停了。
@@ -631,6 +631,7 @@ rollout 客户端一行没碰。
 | rollout 标注完、退出时 `Segmentation fault` / `Aborted (core dumped)` / `terminate called without an active exception` | 发生在数据**存完之后**的收尾（手 SDK、GStreamer、rclpy 的原生线程退出顺序），臂和手早已释放。先确认数据：运行目录里有 `episode.hdf5`（不是 `.part`）和同名 `.npz`，用 §9b ⑦ 自查。只缺 `plots.png` 就补画：`$V/.venv/bin/python ~/openarm/openarm_track/rollout/plot_rollout.py <运行目录>`。2026-09-14 起崩溃时会打印各 Python 线程的位置（faulthandler），出图也挪到了子进程 —— 再崩把终端最后一屏贴出来 |
 | 运行目录里只有 `episode.hdf5.part`、没有 npz | 那是 2026-09-14 修掉的 `finish_rt` NameError（那之前的一条）。`.part` 可以救成 `episode.hdf5`（截到最后一次落盘的行，缺 `cand/*`） |
 | `no tactile tap at /tmp/sharpa_tap.sock`，但 `pgrep -af sharpa_tap` 有进程 | 长时间运行的 tap 的 socket 文件被 `/tmp` 清理删了，进程活着但谁也连不上。`sudo pkill -INT -f "sharpa_tap.py --serve"`，再按 §9b ③ 重起 |
+| 收手失败：`收手失败（退出码 1）` / `failed to set current coeff: Failure to connect to server` / `failed to set speed coeff: Operation not allowed` | **臂不受影响**（收手在臂走到位之后才做，手停在原地、没收到位置指令）。单独重跑收手即可，不用重跑 `after_teleop_home.sh`：`$V/.venv/bin/python $V/hand_home.py --send`（先不带 `--send` 只规划、不动手）。结尾看到 `control source -> IDLE` 就收好了。`Failure to connect to server`：SDK 这一条指令没送到手上，偶发，重跑一般就过；连续失败先看手有没有电、网线 `cat /sys/class/net/enp129s0/operstate` 是不是 `up`。`Operation not allowed`：别的控制源占着手（Pilot 的 APP），2026-09-14 起脚本先切 SDK 再设参数，应该不再出现；还出现就在 Pilot 底部状态栏切到 IDLE 再重跑 |
 | Pilot 点了 reset 后 Control Source 变成 `APP` | Pilot 自己的行为：Sliders 页的 reset 第一步就是切 MASTER（=APP）。rollout 前后都不要点 reset；客户端和收手脚本 2026-09-14 起先切 SDK 再设参数，APP 下也能接管 |
 
 ---
