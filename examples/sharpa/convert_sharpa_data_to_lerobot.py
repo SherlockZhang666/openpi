@@ -51,7 +51,6 @@ Usage:
 from __future__ import annotations
 
 import dataclasses
-import functools
 import json
 import logging
 import pathlib
@@ -319,8 +318,85 @@ def use_h264() -> None:
     h264 crf23 4.7s / 1.9MB. The bigger win is at read time -- 50 random seeks take 0.36s on
     the AV1 file and 0.10s on the h264 one, and random seeks are exactly what the training
     dataloader does. `g=2` (LeRobot's default) is kept: it is what makes those seeks cheap.
+
+    The tactile deform streams are encoded LOSSLESSLY instead; see `_encode_video_frames`.
     """
-    _lrd.encode_video_frames = functools.partial(_lrd.encode_video_frames, vcodec="h264", crf=23)
+    _lrd.encode_video_frames = _encode_video_frames
+
+
+# crf23 is fine for a camera and wrong for a deform map. A deform map is 93-97% flat at the
+# resting code 2 with the signal in 3-7% of the pixels, so a perceptual encoder spends its
+# bitrate on exactly the wrong thing. Measured round trip on one real index channel (524
+# frames of 193151/ep_0005, |F| up to 14.7 N):
+#
+#            encoding                 size   code err mean/max   mm err max   uniform frames kept
+#   h264 crf23 yuv420p (was used)   0.04 MB      0.072 / 50        1080 um         69 / 96
+#   h264 crf0  yuv444p (now used)   0.34 MB      0.004 /  1          30 um         96 / 96
+#
+# Two things break at crf23. The max error is 1.08 mm against a peak deformation of 2.7 mm,
+# i.e. 40% of the signal locally. And 28% of the no-contact frames stop being uniform planes
+# once the encoder puts noise into them, which destroys the one clean bit the map carries --
+# "this pad reports no deformation at all". That is the control group a dead-band study
+# counts, and `collect/tactile.py` goes out of its way to keep it (the 2026-08-19 egg
+# sessions lost 83.5% of their (frame, finger) samples to an earlier version of this bug).
+#
+# Aggregates survive crf23 -- corr(sum of deform, |F|) only moves +0.8031 -> +0.8025 -- so
+# this only matters if the policy looks at the map per pixel. It does.
+#
+# yuv444p, not yuv420p: chroma subsampling would average the map with its own neighbours.
+# Full-range signalling (`-color_range pc`) was tried and is worse, not better: the decoder
+# does not honour the tag and re-applies the tv->pc expansion, costing a flat +16 codes.
+# The residual +-1 at crf0 is RGB->YUV444 rounding, not the codec; it is 0.005 mm below
+# code 100 and 0.03 mm above, against a 1080 um error at crf23.
+#
+# ffv1 would be bit exact and about the same size, but LeRobot's `encode_video_frames`
+# rejects any vcodec outside {h264, hevc, libsvtav1} and the container is .mp4.
+_TACTILE_ENCODING = {"vcodec": "h264", "crf": 0, "pix_fmt": "yuv444p"}
+_CAMERA_ENCODING = {"vcodec": "h264", "crf": 23}
+
+
+# Bound at import, before `use_h264()` swaps the module attribute, so the wrapper below
+# always calls the real encoder and not itself.
+_lrd_encode_video_frames = _lrd.encode_video_frames
+
+
+def _encode_video_frames(imgs_dir, video_path, fps, **kwargs):
+    """Dispatch on the video key: lossless for the deform maps, crf23 for the cameras.
+
+    LeRobot lays videos out as `videos/chunk-NNN/<video_key>/episode_NNNNNN.mp4`, so the
+    parent directory name is the feature key.
+    """
+    key = pathlib.Path(video_path).parent.name
+    preset = _TACTILE_ENCODING if "tactile" in key else _CAMERA_ENCODING
+    return _lrd_encode_video_frames(imgs_dir, video_path, fps, **{**preset, **kwargs})
+
+
+# `tactile/deform` is uint8 and the SDK's `deform_map_value()` maps it to millimetres. The
+# mapping is piecewise linear with a knee at code 100, so the codes are NOT linear in mm --
+# above the knee one code is 6x the deformation it is below it. Normalising the raw uint8
+# to [0, 1] therefore hands the policy a kinked signal that no longer lines up with
+# `observation.tactile_force`; convert first, normalise after.
+#
+# Extracted from libsharpa-wave-sdk.so (symbol _ZN6sharpa7tactile5Touch16deform_map_valueEh)
+# and checked against all 256 codes, max deviation 4.2e-07 (float32 noise). Restated here so
+# the training side does not need the SDK loaded.
+#
+#   code   0 -> 0.000 mm      code 2 (pad at rest) -> 0.010 mm
+#   code 100 -> 0.500 mm      code 255             -> 5.150 mm
+DEFORM_MM_KNEE_CODE = 100
+DEFORM_MM_PER_CODE_LOW = 0.005
+DEFORM_MM_PER_CODE_HIGH = 0.030
+
+
+def deform_code_to_mm(code: np.ndarray) -> np.ndarray:
+    """uint8 deform codes -> millimetres, matching the SDK's `deform_map_value()`."""
+    c = np.asarray(code, dtype=np.float32)
+    return np.where(
+        c <= DEFORM_MM_KNEE_CODE,
+        c * DEFORM_MM_PER_CODE_LOW,
+        DEFORM_MM_KNEE_CODE * DEFORM_MM_PER_CODE_LOW
+        + (c - DEFORM_MM_KNEE_CODE) * DEFORM_MM_PER_CODE_HIGH,
+    )
 
 
 def verify_episode_videos(dataset: LeRobotDataset, episode_index: int, expected: int) -> None:
@@ -562,6 +638,19 @@ def main(
         "engaged_only": True,
         "hand_joint_names": hand_joint_names,
         "tactile_finger_order": finger_order,
+        "video_encoding": {"cameras": _CAMERA_ENCODING, "tactile_deform": _TACTILE_ENCODING},
+        # The deform videos carry the SDK's raw uint8 codes, not millimetres: requantising mm
+        # back into uint8 would throw away the fine 0.005 mm step below the knee. Convert on
+        # the training side with `deform_code_to_mm` (or this formula) BEFORE normalising --
+        # the codes are piecewise linear in mm, not linear.
+        "deform_code_to_mm": {
+            "formula": "mm = code*0.005 if code <= 100 else 0.5 + (code-100)*0.030",
+            "knee_code": DEFORM_MM_KNEE_CODE,
+            "mm_per_code_low": DEFORM_MM_PER_CODE_LOW,
+            "mm_per_code_high": DEFORM_MM_PER_CODE_HIGH,
+            "resting_code": 2,
+            "source": "libsharpa-wave-sdk.so deform_map_value(), all 256 codes, max dev 4.2e-07",
+        },
         "state_layout": "[0:7] left arm joints (obs/joint_pos), [7:29] left hand joints (hand/joint_pos)",
         "action_layout": (
             "[0:22] left hand command (action/hand_joint_pos), [22:25] palm-frame dp (m), "
