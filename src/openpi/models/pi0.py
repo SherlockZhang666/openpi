@@ -221,6 +221,7 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        guidance_fn=None,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
@@ -268,7 +269,12 @@ class Pi0(_model.BaseModel):
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-            return x_t + dt * v_t, time + dt
+            next_actions = x_t + dt * v_t
+            # The default path preserves the original Euler update. An optional
+            # external guide can modify the action sample without changing weights.
+            if guidance_fn is not None:
+                next_actions = guidance_fn(x_t, time, v_t, next_actions)
+            return next_actions, time + dt
 
         def cond(carry):
             x_t, time = carry
