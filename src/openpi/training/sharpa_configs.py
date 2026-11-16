@@ -66,6 +66,9 @@ SHARPA_TASKS: list[SharpaTaskConfig] = [
     SharpaTaskConfig(name="sharpa_tissue", data_subdir="pull_tissue"),
     SharpaTaskConfig(name="sharpa_card", data_subdir="extract_card"),
     SharpaTaskConfig(name="sharpa_tablet", data_subdir="push_tablet"),
+    # All four collected tasks (egg, lightbulb, sandwich bag, cable) in ONE dataset; the per-episode
+    # task string becomes the prompt. Built by TestTimeSteeringWrapUp/pi05_all4/convert_all4.sbatch.
+    SharpaTaskConfig(name="sharpa_all4", data_subdir="all4_tasks", num_train_steps=25_000),
 ]
 
 

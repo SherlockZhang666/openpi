@@ -187,7 +187,7 @@ def test_no_delta_action_transform_is_applied():
 
 def test_four_tasks_are_defined():
     names = [t.name for t in sharpa_configs.SHARPA_TASKS]
-    assert names == ["sharpa_egg", "sharpa_tissue", "sharpa_card", "sharpa_tablet"]
+    assert names == ["sharpa_egg", "sharpa_tissue", "sharpa_card", "sharpa_tablet", "sharpa_all4"]
 
 
 def test_model_keeps_native_action_dim_32():

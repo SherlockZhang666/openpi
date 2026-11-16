@@ -112,6 +112,33 @@ def _longest_true_run(mask: np.ndarray) -> tuple[int, int]:
     return int(starts[k]), int(ends[k])
 
 
+def _engaged_span(engaged: np.ndarray, state: np.ndarray, hold_code: int, max_gap: int = 90) -> tuple[int, int]:
+    """Inclusive [first, last] engaged frame, keeping short HOLD gaps in between.
+
+    The egg sessions of 2026-09-02/03 have exactly one engaged run per episode. The 2026-09-18..24
+    sessions (lightbulb, bag, cable, pick-and-place egg) have 41 episodes where the operator released
+    the deadman for 0.4-2.2 s mid-task (survey 2026-10-13: every gap is teleop/state == HOLD and the
+    arm moves < 0.06 rad). Taking only the longest run would drop e.g. the "place" half of every
+    pick-and-place episode, so the whole span is kept: during HOLD the robot is stationary, so the
+    trajectory stays continuous and the palm-centric wrist deltas are ~0 there.
+    A gap that is not pure HOLD, or longer than `max_gap` frames (3 s), is a real break -> unusable.
+    """
+    idx = np.flatnonzero(engaged)
+    if idx.size == 0:
+        raise UnusableEpisode("never engaged")
+    lo, hi = int(idx[0]), int(idx[-1])
+    gap = ~engaged[lo : hi + 1]
+    if gap.any():
+        if not (state[lo : hi + 1][gap] == hold_code).all():
+            raise UnusableEpisode("disengaged mid-episode with a non-HOLD state")
+        gidx = np.flatnonzero(gap)
+        runs = np.split(gidx, np.flatnonzero(np.diff(gidx) != 1) + 1)
+        longest = max(len(r) for r in runs)
+        if longest > max_gap:
+            raise UnusableEpisode(f"disengaged mid-episode for {longest} frames (> {max_gap})")
+    return lo, hi
+
+
 def _resample_rows(t: np.ndarray, lo: int, hi: int, fps: int) -> tuple[np.ndarray, float]:
     """Nearest-neighbour rows of `t[lo:hi+1]` on an exact `fps` grid. Returns (rows, max error)."""
     ts = t[lo : hi + 1]
@@ -202,7 +229,8 @@ def read_episode(hdf5_path: pathlib.Path, fps: int) -> Episode:
             raise UnusableEpisode("no action/hand_joint_pos (with_hand_action=False)")
 
         engaged = f["teleop/engaged"][:, li]
-        lo, hi = _longest_true_run(engaged)
+        hold_code = int(json.loads(a["state_codes"])["HOLD"])
+        lo, hi = _engaged_span(engaged, f["teleop/state"][:, li], hold_code)
         rows, err = _resample_rows(f["time/t_mono"][:], lo, hi, fps)
 
         for key in ("obs/valid", "hand/valid", "cam_wrist/valid", "action/hand_valid"):
@@ -374,6 +402,9 @@ def main(
     out_root: pathlib.Path = pathlib.Path("/n/netscratch/ydu_lab/Lab/hangxing/data/sharpa_lerobot"),
     task_dir: str = "pick_up_the_egg",
     *,
+    # Additional raw roots (one per task) merged into the SAME dataset. Each episode keeps its own
+    # `task` string from the HDF5 attrs, so prompt_from_task=True yields per-task language prompts.
+    extra_raw_roots: tuple[pathlib.Path, ...] = (),
     only: Literal["both", "train", "tactile"] = "both",
     fps: int = 30,
     image_short_side: int = 256,
@@ -401,10 +432,11 @@ def main(
     want_train = only in ("both", "train")
     want_tactile = only in ("both", "tactile")
 
-    episode_paths = list_episodes(raw_root)
+    raw_roots = (raw_root, *extra_raw_roots)
+    episode_paths = [p for root in raw_roots for p in list_episodes(root)]
     if not episode_paths:
-        raise SystemExit(f"no usable episodes under {raw_root}")
-    logger.info("found %d episodes; building %s", len(episode_paths), only)
+        raise SystemExit(f"no usable episodes under {raw_roots}")
+    logger.info("found %d episodes under %d root(s); building %s", len(episode_paths), len(raw_roots), only)
 
     probe = episode_paths[0]
     with h5py.File(probe, "r") as f:
@@ -552,14 +584,14 @@ def main(
         logger.info("  excluded %3d x %s", count, reason)
     if written == 0:
         raise SystemExit("every episode was excluded -- nothing was written")
-    if expect_episodes is not None and written != expect_episodes:
-        raise SystemExit(f"expected {expect_episodes} usable episodes, kept {written}")
 
     sidecar = {
         "raw_root": str(raw_root),
+        "raw_roots": [str(r) for r in raw_roots],
         "fps": fps,
         "image_short_side": image_short_side,
         "engaged_only": True,
+        "segment": "first..last engaged frame, short HOLD gaps kept (see _engaged_span)",
         "hand_joint_names": hand_joint_names,
         "tactile_finger_order": finger_order,
         "state_layout": "[0:7] left arm joints (obs/joint_pos), [7:29] left hand joints (hand/joint_pos)",
@@ -578,6 +610,8 @@ def main(
     for root in targets:
         (root / "meta" / "sharpa_conversion.json").write_text(json.dumps(sidecar, indent=2))
         logger.info("wrote %d episodes / %d frames to %s", written, total_frames, root)
+    if expect_episodes is not None and written != expect_episodes:
+        raise SystemExit(f"expected {expect_episodes} usable episodes, kept {written} (see meta/sharpa_conversion.json)")
 
 
 if __name__ == "__main__":
